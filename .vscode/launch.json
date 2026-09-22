@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "1. Iniciar Servidor (Buscaminas Server)",
+            "request": "launch",
+            "mainClass": "co.icesi.buscaminas.Main",
+            "projectName": "server",
+            "console": "integratedTerminal"
+        },
+        {
+            "type": "java",
+            "name": "2. Iniciar Cliente (Buscaminas Client)",
+            "request": "launch",
+            "mainClass": "co.icesi.buscaminas.Main",
+            "projectName": "client",
+            "console": "integratedTerminal"
+        }
+    ]
+}

@@ -10,7 +10,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import com.google.gson.Gson;
@@ -21,21 +21,15 @@ import co.icesi.buscaminas.controllers.dtos.Response;
 import co.icesi.buscaminas.model.Cell;
 import co.icesi.buscaminas.services.ServicesImpl;
 
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-
 public class TCPController {
 
+    // Lista de clientes conectados para difundir (broadcast) las actualizaciones en vivo
     private List<BufferedWriter> clients = new CopyOnWriteArrayList<>();
     
     private ServicesImpl services;
-    
     private ServerSocket serverSocket;
-
     private boolean running;
-
-    private Executor executor;
-
+    private ExecutorService executor;
     private Gson gson;
 
     public TCPController(ServicesImpl services) {
@@ -46,7 +40,8 @@ public class TCPController {
         this.services = services;
         try {
             serverSocket = new ServerSocket(port);
-            executor = Executors.newFixedThreadPool(5);
+            // Usamos newCachedThreadPool para aceptar múltiples clientes sin límite fijo
+            executor = Executors.newCachedThreadPool();
             gson = new GsonBuilder().create();
         } catch (Exception e) {
             e.printStackTrace();
@@ -62,12 +57,31 @@ public class TCPController {
         return running;
     }
 
+    /**
+     * Envía una respuesta a TODOS los clientes conectados de manera segura.
+     * Si un cliente se desconecta, se remueve automáticamente de la lista.
+     */
+    public void broadcast(Response response) {
+        String json = gson.toJson(response);
+        for (BufferedWriter client : clients) {
+            try {
+                client.write(json);
+                client.newLine();
+                client.flush();
+            } catch (Exception e) {
+                // Si falla el envío, el cliente se desconectó
+                clients.remove(client);
+            }
+        }
+    }
+
     public void startService() {
         System.out.println("TCP Service started on port " + serverSocket.getLocalPort());
         while (running) {
             try {
                 executor.execute(new TCPClientHandler(serverSocket.accept(), services));
             } catch (Exception e) {
+                if (!running) break;
                 e.printStackTrace();
             }
         }
@@ -89,120 +103,139 @@ public class TCPController {
         }
 
         @Override
-public void run() {
-    try {
-        System.out.println("Client connected: " + clientSocket.getInetAddress());
+        public void run() {
+            BufferedWriter writer = null;
+            try {
+                System.out.println("Client connected: " + clientSocket.getInetAddress());
 
-        BufferedReader reader = new BufferedReader(
-                new InputStreamReader(clientSocket.getInputStream()));
+                BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(clientSocket.getInputStream()));
 
-        BufferedWriter writer = new BufferedWriter(
-                new OutputStreamWriter(clientSocket.getOutputStream()));
+                writer = new BufferedWriter(
+                        new OutputStreamWriter(clientSocket.getOutputStream()));
 
-        clients.add(writer);
+                // Registramos al cliente en la lista para futuros broadcasts
+                clients.add(writer);
 
-        while (true) {
+                // Enviar inmediatamente el estado actual del tablero al cliente recién conectado
+                Response initialResponse = new Response();
+                initialResponse.status = "OK";
+                initialResponse.data = new HashMap<>();
+                initialResponse.data.put("board", services.printBoard());
+                writer.write(gson.toJson(initialResponse));
+                writer.newLine();
+                writer.flush();
 
-            String line = reader.readLine();
+                while (true) {
+                    String line = reader.readLine();
+                    if (line == null) break;
 
-            if (line == null) break;
+                    Request rq = gson.fromJson(line, Request.class);
+                    if (rq == null || rq.action == null) continue;
 
-            Request rq = gson.fromJson(line, Request.class);
-            Map<String, String> data = rq.data;
+                    Map<String, String> data = rq.data;
+                    Response response = new Response();
+                    response.data = new HashMap<>();
 
-            Response response = new Response();
-            response.data = new HashMap<>();
+                    String action = rq.action.toUpperCase();
 
-            switch (rq.action) {
+                    switch (action) {
 
-                case "SELECT_CELL":
-                    int i = Integer.parseInt(data.get("i"));
-                    int j = Integer.parseInt(data.get("j"));
+                        case "SELECT_CELL":
+                            int i = Integer.parseInt(data.get("i"));
+                            int j = Integer.parseInt(data.get("j"));
 
-                    try {
-                        boolean resp = services.selectCell(i, j);
-                        response.status = "OK";
-                        response.data.put("win", resp);
-                        response.data.put("gameEnd", resp);
-                        response.data.put("message",
-                                "Celda (" + i + ", " + j + ") despejada.");
-                    } catch (Exception e) {
-                        response.status = "GAME_OVER";
-                        response.data.put("gameEnd", true);
-                        response.data.put("win", false);
-                        response.data.put("message", e.getMessage());
+                            try {
+                                boolean resp = services.selectCell(i, j);
+                                response.status = "OK";
+                                response.data.put("win", resp);
+                                response.data.put("gameEnd", resp);
+                                response.data.put("message",
+                                        "Celda (" + i + ", " + j + ") despejada.");
+                            } catch (Exception e) {
+                                response.status = "GAME_OVER";
+                                response.data.put("gameEnd", true);
+                                response.data.put("win", false);
+                                response.data.put("message", e.getMessage());
+                            }
+
+                            Cell[][] board = services.printBoard();
+                            response.data.put("board", board);
+                            // Notificar la jugada a TODOS los clientes conectados
+                            broadcast(response);
+                            break;
+
+                        case "MARK_CELL":
+                            i = Integer.parseInt(data.get("i"));
+                            j = Integer.parseInt(data.get("j"));
+
+                            try {
+                                services.markCell(i, j);
+                                response.status = "OK";
+                                response.data.put("message",
+                                        "Celda (" + i + ", " + j + ") marcada/desmarcada.");
+                            } catch (Exception e) {
+                                response.status = "ERROR";
+                                response.data.put("message", e.getMessage());
+                            }
+
+                            board = services.printBoard();
+                            response.data.put("board", board);
+                            // Notificar el marcado a TODOS los clientes conectados
+                            broadcast(response);
+                            break;
+
+                        case "SHOW_ALL":
+                        case "SOW_ALL":
+                            services.showAll(true);
+                            board = services.printBoard();
+                            response.status = "OK";
+                            response.data.put("board", board);
+                            broadcast(response);
+                            break;
+
+                        case "GET_BOARD":
+                            board = services.printBoard();
+                            response.status = "OK";
+                            response.data.put("board", board);
+                            // Responder solo al cliente que lo pidió
+                            writer.write(gson.toJson(response));
+                            writer.newLine();
+                            writer.flush();
+                            break;
+
+                        case "INIT_GAME":
+                            i = Integer.parseInt(data.get("n"));
+                            j = Integer.parseInt(data.get("m"));
+                            int m = Integer.parseInt(data.get("minas"));
+
+                            services.initGame(i, j, m);
+
+                            board = services.printBoard();
+                            response.status = "OK";
+                            response.data.put("message", "Juego reiniciado con éxito.");
+                            response.data.put("board", board);
+                            // Notificar el reinicio a TODOS los clientes
+                            broadcast(response);
+                            break;
+
+                        default:
+                            break;
                     }
+                }
 
-                    Cell[][] board = services.printBoard();
-                    response.data.put("board", board);
-                    break;
+            } catch (Exception e) {
+                // Conexión interrumpida o cerrada por el cliente
+            } finally {
+                if (writer != null) {
+                    clients.remove(writer);
+                }
+                try {
+                    clientSocket.close();
+                } catch (Exception ignored) {}
 
-                case "MARK_CELL":
-                    i = Integer.parseInt(data.get("i"));
-                    j = Integer.parseInt(data.get("j"));
-
-                    try {
-                        services.markCell(i, j);
-                        response.status = "OK";
-                        response.data.put("message",
-                                "Celda (" + i + ", " + j + ") marcada/desmarcada.");
-                    } catch (Exception e) {
-                        response.status = "ERROR";
-                        response.data.put("message", e.getMessage());
-                    }
-
-                    board = services.printBoard();
-                    response.data.put("board", board);
-                    break;
-
-                case "SHOW_ALL":
-                case "SOW_ALL":
-                    services.showAll(true);
-                    board = services.printBoard();
-                    response.status = "OK";
-                    response.data.put("board", board);
-                    break;
-
-                case "GET_BOARD":
-                    board = services.printBoard();
-                    response.status = "OK";
-                    response.data.put("board", board);
-                    break;
-
-                case "INIT_GAME":
-                    i = Integer.parseInt(data.get("n"));
-                    j = Integer.parseInt(data.get("m"));
-                    int m = Integer.parseInt(data.get("minas"));
-
-                    services.initGame(i, j, m);
-
-                    board = services.printBoard();
-                    response.status = "OK";
-                    response.data.put("board", board);
-                    break;
-
-                default:
-                    break;
-            }
-
-            // Enviar la respuesta a TODOS los clientes
-            String json = gson.toJson(response);
-
-            for (BufferedWriter client : clients) {
-                client.write(json);
-                client.newLine();
-                client.flush();
+                System.out.println("Client disconnected: " + clientSocket.getInetAddress());
             }
         }
-
-        clients.remove(writer);
-        clientSocket.close();
-
-        System.out.println("Client disconnected: " +
-                clientSocket.getInetAddress());
-
-    } catch (Exception e) {
-        e.printStackTrace();
     }
-}}
 }

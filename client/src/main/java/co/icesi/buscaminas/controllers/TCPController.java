@@ -17,119 +17,129 @@ import co.icesi.buscaminas.model.Cell;
 
 public class TCPController {
 
-    private String host; //El host al que se conecta, como localhost o un host en internet
-    private int port; //El puerto por el que se conecta como puerto 12345
-    private Gson gson; //Libreria de Google que sirve para convertir de Java a JSON
-    //Por ejemplo si tengo un objeto Java como Request req y quiero enviarlo por el socket, lo debo convertir a JSON con gson.toJson(req)
+    private String host; // El host al que se conecta, como localhost
+    private int port;    // El puerto por el que se conecta (ej. 12345)
+    private Gson gson; //Libreria de google para convertir de Java a Json
 
-    private Cell[][] board; //Mi matriz que es mi tablero
-    private boolean gameOver; //Mensaje de que perdio
-    private boolean win; //Mensaje de que gano
+    // Estado local del juego
+    private Cell[][] board;
+    private boolean gameOver;
+    private boolean win;
 
-    public TCPController(String host, int port) { // Constructor que se conecta al puerto (No sé)
+    // Conexión persistente con el servidor
+    private Socket socket; 
+    private BufferedWriter writer;
+    private BufferedReader reader;
+
+    public TCPController(String host, int port) { //Constructor que hace a un cliente y se corre en localhost y conecta a un puerto especifico
         this.host = host;
         this.port = port;
-        this.gson = new GsonBuilder().create(); //Aquí se crea un objeto que permite trabajar con JSON
+        this.gson = new GsonBuilder().create(); //Se crea un objeto que permite trabajar con Json
     }
 
-
-    //Revisar
-    public void sendRequest(String action, Map<String, String> data) { //Recibe como parametro nuestra accion(Destapar, Marcar, Salir), y los dos valores que queremos poner(fila, columna).
-        try (Socket socket = new Socket(host, port); //Se hace un try catch grande en todo el metodo para poder confirmar que enviar el mensaje funciona o falla con el server
-
-             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream())); //Cuando creo un socket tengo socket.getOutputStream() envia info
-
-             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) { //Recibe info del socket
-
+    /**
+     * Envía una acción y sus parámetros al servidor a través del socket persistente.
+     * Ya no abre ni cierra el socket por cada petición, permitiendo comunicación bidireccional.
+     */
+    public void sendRequest(String action, Map<String, String> data) {
+        try {
             Request req = new Request();
             req.action = action;
-            if(data != null){
-                req.data = data; //Si recibo datos los guardo
-            } else {
-                req.data = Map.of(); //Si no recibo datos pongo un mapa vacío
-            }
-            
-            writer.write(gson.toJson(req) + "\n"); //Convertimos nuestro objeto Java en Json para poder escribir a traves del socket
-            writer.flush(); // Forzamos a que el writer mande al socket todo lo que tenga para que no se acumule la info
+            req.data = (data != null) ? data : Map.of(); //Me indica de forma opcional si hay data me retorna un tablero con info, sino un tablero limpio
 
-            String line = reader.readLine(); //Aquí recibimos la respuesta del server
-            if (line == null) return;
-            
-            Response res = gson.fromJson(line, Response.class); //Ya aquí lo que pasa es lo inverso, que es que recibimos de formato Json que nos da de respuesta el server
-            //Con esto podemos ver si hay res.data, res.status y demás atributos que tiene el objeto Response en su clase
-            
-            // Actualizar el estado local con la respuesta
-            if (res.data != null) {
-                if (res.data.containsKey("board")) {
-                    this.board = gson.fromJson(gson.toJson(res.data.get("board")), Cell[][].class);
-                }
-                if (res.data.containsKey("message")) {
-                    System.out.println("-> " + res.data.get("message"));
-                }
-                this.gameOver = "GAME_OVER".equals(res.status) || Boolean.parseBoolean(String.valueOf(res.data.get("gameEnd")));
-                this.win = Boolean.parseBoolean(String.valueOf(res.data.get("win")));
-            }
+            writer.write(gson.toJson(req) + "\n"); //Convierte el objeto Java a Jsonpara poder comunicarse con el socket y así poder escribir.
+            writer.flush(); // Forzamos el envío inmediato
         } catch (Exception e) {
-            System.out.println("Error de red: " + e.getMessage());
+            System.out.println("Error de red enviando petición: " + e.getMessage());
         }
     }
 
-    //Actualizamos el board para que nos quede el tablero en vivo
-    public void updateBoard(){
-        sendRequest("Get_Board", null); //Ahí puede ir cualquier texto pero así entendemos bien la acción
-    }
-
-    //Logica con los dos bucles for para que se imprima el tablero especificando la cantidad de filas y columnas que se digitaron
+    // Imprime el tablero con formato claro
     public void printBoard() {
         if (board == null)
             return;
         System.out.println("\n=== TABLERO ===");
         System.out.print("   ");
-        for (int c = 0; c < board[0].length; c++) System.out.printf("%2d ", c);
+        for (int z = 0; z < board[0].length; z++){ //Se establece el tamaño del tablero y se hace con base a ese tamaño
+            System.out.printf("%2d ", z);
+        }
         System.out.println();
 
-        for (int r = 0; r < board.length; r++) {
-            System.out.printf("%2d ", r);
-            for (int c = 0; c < board[0].length; c++) {
-                System.out.print(" " + board[r][c] + " ");
+        for (int x = 0; x < board.length; x++) {
+            System.out.printf("%2d ", x);
+            for (int i = 0; i < board[0].length; i++) {
+                System.out.print(" " + board[x][i] + " ");
             }
             System.out.println();
         }
         System.out.println("===============");
     }
 
-    //Esto es lo que ejecuta el cliente para correr el juego
+    /**
+     * Bucle principal interactivo del cliente:
+     * 1. Abre el socket una sola vez.
+     * 2. Inicia un hilo en segundo plano que escucha actualizaciones del servidor en vivo.
+     * 3. El hilo principal lee la entrada del usuario por consola y envía las acciones.
+     */
     public void start() {
-        System.out.println("Conectando con el servidor...");
-        sendRequest("GET_BOARD", null);
-        if (board == null) {
-            System.out.println("No se pudo conectar. ¡Asegúrate de ejecutar el servidor primero!");
+        System.out.println("Conectando con el servidor en " + host + ":" + port + "...");
+        try { //Establecemos toda la conexión del cliente con el server
+            socket = new Socket(host, port); //Al objeto socket le pasamos el host y port necesarios
+            writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream())); //Escribimos
+            reader = new BufferedReader(new InputStreamReader(socket.getInputStream())); //Escuchamos
+        } catch (Exception e) {
+            System.out.println("No se pudo conectar: " + e.getMessage());
+            System.out.println("¡Asegúrate de ejecutar el servidor primero!");
             return;
+        }
+
+        // Hilo en segundo plano que escucha las actualizaciones del servidor en vivo (Push)
+        Thread listenerThread = new Thread(() -> {
+            try {
+                String line = null;
+                // Escucha de manera continua cualquier mensaje que difunda el servidor
+                while ((line = reader.readLine()) != null) {
+                    
+                    Response res = gson.fromJson(line, Response.class);
+
+                    if (res != null && res.data != null) {
+                        if (res.data.containsKey("board")) {
+                            this.board = gson.fromJson(gson.toJson(res.data.get("board")), Cell[][].class);
+                        }
+                        if (res.data.containsKey("message")) {
+                            System.out.println("\n-> " + res.data.get("message"));
+                        }
+                        this.gameOver = "GAME_OVER".equals(res.status) || Boolean.parseBoolean(String.valueOf(res.data.get("gameEnd")));
+                        this.win = Boolean.parseBoolean(String.valueOf(res.data.get("win")));
+
+                        // Imprimir el tablero actualizado en vivo
+                        printBoard();
+
+                        if (gameOver) {
+                            System.out.println(win ? "¡FELICIDADES, GANASTE!" : "¡GAME OVER, PISASTE UNA MINA!");
+                        }
+
+                        System.out.println("\n1: Destapar | 2: Marcar | 3: Reiniciar | -1: Salir");
+                        System.out.print("Elige una opción: ");
+                    }
+                }
+            } catch (Exception e) {
+                if (socket != null && !socket.isClosed()) {
+                    System.out.println("\nConexión con el servidor terminada.");
+                }
+            }
+        });
+        listenerThread.setDaemon(true);
+        listenerThread.start();
+
+        // Esperar unos instantes a que llegue el tablero inicial del servidor
+        for (int k = 0; k < 10 && board == null; k++) {
+            try { Thread.sleep(100); } catch (InterruptedException ignored) {}
         }
 
         Scanner scanner = new Scanner(System.in);
 
-        Thread updater = new Thread(() -> {
-            while(!gameOver){
-                updateBoard();
-            try {
-                Thread.sleep(500); //Actualiza cada 500 milesimas
-            } catch (InterruptedException e){
-                break;
-            }
-            }
-        });
-
-        updateBoard();
-        printBoard();
-
         while (true) {
-            printBoard();
-            if (gameOver) System.out.println(win ? "¡FELICIDADES, GANASTE!" : "¡GAME OVER, PISASTE UNA MINA!");
-
-            System.out.println("\n1: Destapar | 2: Marcar | 3: Reiniciar | -1: Salir");
-            System.out.print("Elige una opción: ");
-            
             if (!scanner.hasNextInt()) break;
             int op = scanner.nextInt();
             if (op == -1) break;
@@ -137,18 +147,22 @@ public class TCPController {
             if (op == 3) {
                 System.out.print("Filas, Columnas y Minas (Ej: 8 8 10): ");
                 sendRequest("INIT_GAME", Map.of("n", scanner.next(), "m", scanner.next(), "minas", scanner.next()));
-                gameOver = false; win = false;
+                gameOver = false;
+                win = false;
             } else if (op == 1 || op == 2) {
                 if (gameOver) {
                     System.out.println("Partida terminada. Reinicia con la opción 3.");
                     continue;
                 }
                 System.out.print("Fila y Columna (Ej: 0 0): ");
-                // Usamos un if ternario para enviar SELECT_CELL o MARK_CELL en una sola línea
                 sendRequest(op == 1 ? "SELECT_CELL" : "MARK_CELL", Map.of("i", scanner.next(), "j", scanner.next()));
             } else {
                 System.out.println("Opción no válida.");
             }
         }
+
+        try {
+            socket.close();
+        } catch (Exception ignored) {}
     }
 }
